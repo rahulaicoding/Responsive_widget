@@ -1,0 +1,160 @@
+ROLE
+You are a senior front-end engineer and an AODA / WCAG 2.0 AA accessibility expert
+(also apply WCAG 2.1/2.2 AA best practices). Build the feature below in
+[TECHNOLOGY: e.g. GWT 2.x with Java + UiBinder / React / Angular / plain HTML5+JS].
+
+GOAL
+Build a page with a data table and asynchronous, stacking notification popups
+that never cover the table. They must be fully accessible and adapt to screen
+size, device and zoom level.
+
+1. MAIN PAGE
+- A data table with [10] rows and [5] columns of dummy data about [books]
+  (Title, Author, Genre, Year, Pages).
+- Semantic table: caption, <th scope="col"> headers, and a row header in the first column.
+- The table sits in a labelled, keyboard-focusable scroll region so it can
+  scroll horizontally inside itself without making the page scroll sideways.
+- When no popup exists, the page uses its ORIGINAL layout. Nothing is reserved,
+  padded or shrunk permanently.
+
+2. NOTIFICATION POPUPS
+- A new popup appears every [15] seconds, triggered by an async source
+  (timer here; in production a WebSocket, server push or RPC callback).
+- Default position: floating in the bottom-right corner of the viewport.
+- Stacking: each new popup goes BEHIND the existing ones, offset [10px] upward,
+  so a thin strip of each older popup stays visible. The oldest is in front.
+  - All popups in the stack have equal height so the strip is always visible.
+  - Show at most [4] layers visually. Extra popups stay queued and are hidden.
+- Only the front popup is interactive. Popups behind it are aria-hidden and
+  inert (not focusable, not announced).
+- Each popup shows: "Notification X of N", a title, a message, and buttons:
+  Primary action ("View in table"), Dismiss, and Dismiss all (only when N > 1).
+- Popups never auto-dismiss.
+- A user-controlled "Pause new notifications" toggle (aria-pressed) stops new
+  popups (WCAG 2.2.2).
+
+3. ADAPTIVE PLACEMENT (dynamic, not permanent)
+Run this on: popup added, popup removed, window resize, zoom, and rotation.
+
+  If there are no popups:
+      restore the original layout (clear any table width override, return the
+      stack to the floating corner position).
+  Otherwise measure (all in CSS px; use rem so browser zoom is respected):
+      originalW  = content width of the table's container with no override
+      left       = left edge of the table's container
+      popupW     = min(22.5rem, viewportWidth - 2rem)
+      popupLeft  = viewportWidth - 1rem - popupW
+      limit      = popupLeft - 16px gap
+      avail      = limit - left
+  Decide placement:
+      A. NONE   - if the table's right edge <= limit: change nothing.
+      B. SHRINK - else if avail >= MIN_TABLE_RATIO * originalW (default 0.70):
+                  set the table container's max-width to avail. Only the
+                  container shrinks. The table scrolls horizontally inside it
+                  if needed.
+      C. BELOW  - else: clear any shrink and move the popup stack out of the
+                  floating position into normal document flow directly BELOW
+                  the table, right-aligned to the screen, with extra top
+                  margin for the stacking offsets. Show a visible "Go to
+                  notifications below the table (N)" button in the page header.
+  Rules:
+      - MIN_TABLE_RATIO is a single named constant, so it is easy to change.
+      - Add ~5% hysteresis when leaving BELOW so a scrollbar appearing or
+        disappearing cannot cause flip-flopping.
+      - Decisions are based on width only, so scrolling never triggers reflow.
+      - Batch recalculation (e.g. one animation frame / scheduler) to avoid layout thrash.
+      - If focus is inside the stack when it moves in the DOM, restore focus to
+        the same control afterward.
+
+4. ACCESSIBILITY REQUIREMENTS (AODA / WCAG 2.0 AA, plus 2.1/2.2 best practice)
+- Live region: a role="status" aria-live="polite" aria-atomic="true" element must
+  exist in the DOM at page load. Announce "New notification. <title>. <message>.
+  You now have N notifications. Press Alt+N to review." Also announce dismiss,
+  dismiss-all, pause and resume. Send all async events through ONE announce()
+  function. Reset the region's text and re-set it after ~100 ms so repeated
+  messages are re-announced.
+- Never move focus when a popup appears (3.2.1).
+- Landmark: <aside aria-label="Notifications">. Each popup is role="group"
+  with aria-labelledby and aria-describedby.
+- Keyboard:
+    - Alt+N and a "Skip to notifications" skip link focus the front popup.
+    - Esc inside the notifications dismisses the front popup.
+    - Every function is reachable by keyboard in a logical order.
+- Focus management: when the focused popup is removed, move focus to the next
+  popup's first button, or back to the last element focused outside the stack,
+  or else to <main tabindex="-1">. Focus must never fall back to <body>.
+- Focus visibility: visible focus ring on EVERY interactive element using
+  :focus (not only :focus-visible), >= 3px, with contrast >= 3:1 against the
+  adjacent colour on both light and dark surfaces.
+- Contrast: text >= 4.5:1; UI components >= 3:1. Never use colour alone.
+- Target size >= 44x44 CSS px.
+- Reflow: no two-dimensional page scroll at 320px or 400% zoom, except inside
+  the table's own scroll region. Popups limited to ~45% viewport height with
+  internal scroll.
+- Motion: respect prefers-reduced-motion. No flashing.
+- Support forced-colors mode.
+- Skip links for main content and notifications.
+- Set the page language, e.g. lang="en-CA".
+- Insert dynamic text as text, never as HTML (XSS-safe).
+- Use real <button> elements with accessible names.
+
+5. DELIVERABLES
+- Complete source for [TECHNOLOGY], runnable as-is.
+- A short explanation of how the layout algorithm maps onto this technology.
+- A manual test checklist (below) with expected results.
+- A list of assumptions and the tunable constants.
+
+6. ACCEPTANCE TESTS (state pass/fail for each)
+  a. No popup: table width and layout are identical to the original.
+  b. Wide desktop, popup appears: either NONE or SHRINK. No pixel of the
+     table is covered. On dismiss, the table returns to its original width.
+  c. Tablet / mid-width: SHRINK up to 30%, then BELOW once the reduction would
+     exceed that.
+  d. Phone / 400% zoom: BELOW mode, popups right-aligned under the table, and
+     the header button appears.
+  e. Resize or zoom while popups are shown: placement updates without reload.
+  f. Screen reader (NVDA/JAWS/VoiceOver): the arrival of each popup is
+     announced once; popups behind are not read; no focus theft.
+  g. Keyboard only: Tab, Alt+N, Esc, Dismiss all and pause work; focus is
+     always visible and never lost.
+  h. Pause stops new popups; resume restarts them; both are announced.
+  i. Automated scan (axe/WAVE) shows no violations. Manual review is still done.
+
+CONSTRAINTS
+- Don't add libraries unless [TECHNOLOGY] needs them.
+- Keep all tunables (INTERVAL_MS, MAX_LAYERS, STACK_OFFSET_PX, MIN_TABLE_RATIO,
+  GAP_PX, POPUP_WIDTH_REM) as named constants at the top.
+- Comment the non-obvious accessibility decisions.
+
+
+
+
+
+
+
+
+
+GWT NOTES
+- Use GWT [2.10+] with UiBinder, or plain Widgets. Target Java 11.
+- Put the live region and <aside> in the host HTML page so they exist at load.
+- Wrap DOM access in JsInterop (elemental2 / gwt-elemental) or JSNI.
+- Use ResizeObserver via JsInterop if available, plus Window.addResizeHandler,
+  and schedule the layout with Scheduler.get().scheduleFinally.
+  getComputedStyle, getBoundingClientRect and clientWidth should be read through
+  JsInterop, not guessed from Widget sizes.
+- Emit all async events (RPC callbacks, EventBus, Timer) through one
+  NotificationService with methods add(), dismissFront(), dismissAll(),
+  setPaused() and relayout(). Presenters call this service, not the DOM.
+- Use CssResource (with @external for class names toggled from script) for
+  styles. Use a Messages interface for all user-facing strings so they can be
+  localized (en-CA / fr-CA).
+- Keep layout and focus logic out of views; a pure Java class holding the
+  placement decision (NONE/SHRINK/BELOW) can be JUnit-tested with plain numbers.
+- Use GWTTestCase only where DOM behaviour must be verified.
+
+
+
+
+Swap the "books table" for any content. The placement logic only needs the table container's left edge and width.
+For React or Angular, keep the same decision function as pure logic and call it from a resize/layout hook.
+If your table is inside a sidebar layout, change left and originalW to measure that container.
