@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en-CA">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Book Catalogue – Accessible Stacked Notifications Demo</title>
+  <style>
+    :root {
+      --text: #1a1a1a;
+      --bg: #ffffff;
+      --header-bg: #14213d;      /* white on this = 15:1 */
+      --zebra: #f1f3f8;
+      --focus: #005fcc;          /* 6.6:1 on white */
+      --toast-bg: #14213d;
+      --toast-text: #ffffff;
+      --toast-accent: #ffbf47;   /* 10:1 on toast-bg */
+      --offset: 10px;            /* visible strip of each stacked popup */
+    }
+
+    * { box-sizing: border-box; }
+
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+      font-size: 1rem;
+      line-height: 1.5;
+      color: var(--text);
+      background: var(--bg);
+      padding-bottom: 1rem;
+    }
+
+    /* Visible focus indicator everywhere (WCAG 2.4.7) */
+    :focus { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+    /* Screen-reader-only text */
+    .sr-only {
+      position: absolute !important;
+      width: 1px; height: 1px;
+      margin: -1px; padding: 0; border: 0;
+      overflow: hidden; clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
+    /* Skip links (WCAG 2.4.1) */
+    .skip-link {
+      position: absolute; left: 0.5rem; top: -4rem;
+      background: #fff; color: var(--focus);
+      padding: 0.75rem 1rem; border: 2px solid var(--focus);
+      border-radius: 4px; z-index: 1000; font-weight: 600;
+    }
+    .skip-link:focus { top: 0.5rem; }
+
+    header, main { max-width: 64rem; margin: 0 auto; padding: 1rem; }
+    h1 { font-size: 1.75rem; margin: 0.5rem 0; }
+
+    .controls { margin: 1rem 0; }
+
+    button {
+      font: inherit;
+      min-height: 44px; min-width: 44px;   /* target size (WCAG 2.5.5/2.5.8) */
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: var(--header-bg); color: #fff;
+      border: 2px solid var(--header-bg);
+    }
+    .btn-primary[aria-pressed="true"] {
+      background: #fff; color: var(--header-bg);
+    }
+
+    /* ---------- Table ---------- */
+    .table-wrap { overflow-x: auto; }          /* scrolls inside itself at 400% zoom */
+    table { border-collapse: collapse; width: 100%; min-width: 34rem; }
+    caption { text-align: left; font-weight: 700; font-size: 1.125rem; padding: 0.5rem 0; }
+    th, td { border: 1px solid #5c6370; padding: 0.625rem 0.75rem; text-align: left; vertical-align: top; }
+    thead th { background: var(--header-bg); color: #fff; }
+    tbody tr:nth-child(even) { background: var(--zebra); }
+    tbody th { font-weight: 600; }
+    tbody th:focus { outline: 3px solid var(--focus); outline-offset: -3px; }
+    tr.highlight { outline: 3px solid var(--focus); outline-offset: -3px; }
+
+    /* ---------- Notification stack ---------- */
+    #notifications {
+      position: fixed;
+      right: 1rem;
+      bottom: 1rem;
+      width: min(22.5rem, calc(100vw - 2rem));
+      z-index: 900;
+      display: grid;                 /* all popups share one cell => they overlap */
+      align-items: stretch;          /* equal heights so the 10px strip always shows */
+      pointer-events: none;          /* empty areas never block the page */
+      max-height: 45vh;              /* never swallow a short / zoomed viewport */
+      max-height: 45dvh;
+    }
+    #notifications[hidden] { display: none; }
+
+    .toast {
+      grid-area: 1 / 1;
+      pointer-events: auto;
+      display: flex; flex-direction: column; gap: 0.5rem;
+      background: var(--toast-bg);
+      color: var(--toast-text);
+      border: 2px solid #fff;
+      border-top: 4px solid var(--toast-accent);
+      border-radius: 8px;
+      padding: 0.75rem 1rem 1rem;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+      /* depth 0 = front. Each older/behind popup sits 10px higher and below in z-order */
+      --depth: 0;
+      transform: translateY(calc(var(--depth) * var(--offset) * -1));
+      z-index: calc(100 - var(--depth));
+      transition: transform 0.25s ease, opacity 0.25s ease;
+      overflow-y: auto;              /* long text scrolls inside the popup at high zoom */
+      min-height: 0;
+    }
+    .toast.entering { opacity: 0; }
+    .toast.too-deep { opacity: 0; visibility: hidden; }   /* beyond 4 layers */
+    .toast.is-behind { pointer-events: none; }
+
+    .toast-meta { font-size: 0.875rem; color: #e6e9f0; margin: 0; }
+    .toast-title { font-size: 1.0625rem; font-weight: 700; margin: 0; }
+    .toast-body { margin: 0; }
+    .toast-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: auto; }
+
+    .toast button {
+      background: transparent; color: #fff;
+      border: 2px solid #fff;
+    }
+    .toast button.primary { background: var(--toast-accent); color: #14213d; border-color: var(--toast-accent); font-weight: 600; }
+    .toast :focus { outline: 3px solid var(--toast-accent); outline-offset: 2px; }
+    .toast .primary:focus { outline-color: #fff; }
+
+    /* ---------- Adaptive placement ----------
+       Default: popups float in the bottom-right corner and the page uses its
+       ORIGINAL layout. Script (layoutNotifications) only intervenes while popups
+       exist AND would overlap the table:
+         1. shrink the table's width (never below 70% of original), or
+         2. if that is not enough, add class .in-flow: the popups leave the
+            floating position and sit below the table, right-aligned to the screen. */
+    #notifications.in-flow {
+      position: static;
+      width: min(22.5rem, calc(100% - 2rem));
+      margin: 3rem 1rem 1rem auto;   /* 3rem top: room for the 10px stacking offsets */
+    }
+
+    /* Honour reduced-motion preference (WCAG 2.3.3 / best practice) */
+    @media (prefers-reduced-motion: reduce) {
+      .toast { transition: none; }
+    }
+
+    /* Windows High Contrast / forced colors */
+    @media (forced-colors: active) {
+      .toast { border: 2px solid CanvasText; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <a class="skip-link" href="#notifications" id="skip-notifications">Skip to notifications</a>
+
+  <div class="page">
+  <header>
+    <h1>Book Catalogue</h1>
+    <p>
+      A new notification appears every 15 seconds in the bottom-right corner. When there is no popup the page keeps its normal layout. When a popup would overlap the table, the table narrows to make room; if it would have to shrink too much, the popups move below the table instead.
+      Press <kbd>Alt</kbd> + <kbd>N</kbd> to move to the newest notification, and <kbd>Esc</kbd> to dismiss it.
+    </p>
+    <div class="controls">
+      <button type="button" id="pause-btn" class="btn-primary" aria-pressed="false">
+        Pause new notifications
+      </button>
+      <button type="button" id="below-btn" class="btn-primary" hidden></button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <div class="table-wrap" role="region" aria-labelledby="books-caption" tabindex="0">
+      <table id="books-table">
+        <caption id="books-caption">Featured books (10 titles)</caption>
+        <thead>
+          <tr>
+            <th scope="col">Title</th>
+            <th scope="col">Author</th>
+            <th scope="col">Genre</th>
+            <th scope="col">Year</th>
+            <th scope="col">Pages</th>
+          </tr>
+        </thead>
+        <tbody id="books-body"></tbody>
+      </table>
+    </div>
+  </main>
+  </div>
+
+  <!-- Live region: exists in the DOM at load, so announcements are reliable (WCAG 4.1.3) -->
+  <div id="sr-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Notification landmark; popups are inserted here -->
+  <aside id="notifications" aria-label="Notifications" tabindex="-1" hidden></aside>
+
+  <script>
+  (function () {
+    'use strict';
+
+    /* ================= Configuration ================= */
+    var INTERVAL_MS = 15000;   // a new popup every 15 seconds
+    var MAX_VISIBLE_LAYERS = 4; // popups deeper than this are hidden (still queued)
+
+    /* ================= Dummy data ================= */
+    var BOOKS = [
+      ['The Handmaid\'s Tale', 'Margaret Atwood', 'Dystopian fiction', 1985, 311],
+      ['Fifth Business', 'Robertson Davies', 'Literary fiction', 1970, 266],
+      ['Anne of Green Gables', 'L. M. Montgomery', 'Children\'s classic', 1908, 320],
+      ['The Stone Angel', 'Margaret Laurence', 'Literary fiction', 1964, 308],
+      ['Life of Pi', 'Yann Martel', 'Adventure', 2001, 319],
+      ['Alias Grace', 'Margaret Atwood', 'Historical fiction', 1996, 468],
+      ['The English Patient', 'Michael Ondaatje', 'Historical fiction', 1992, 307],
+      ['Station Eleven', 'Emily St. John Mandel', 'Science fiction', 2014, 333],
+      ['Barometer Rising', 'Hugh MacLennan', 'Historical fiction', 1941, 280],
+      ['Obasan', 'Joy Kogawa', 'Historical fiction', 1981, 256]
+    ];
+
+    /* ================= Build table ================= */
+    var tbody = document.getElementById('books-body');
+    BOOKS.forEach(function (b, i) {
+      var tr = document.createElement('tr');
+      tr.id = 'book-' + i;
+
+      var th = document.createElement('th');      // row header for screen readers
+      th.scope = 'row';
+      th.tabIndex = -1;                            // programmatically focusable only
+      th.textContent = b[0];
+      tr.appendChild(th);
+
+      for (var c = 1; c < b.length; c++) {
+        var td = document.createElement('td');
+        td.textContent = b[c];                     // textContent => no HTML injection
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    });
+
+    /* ================= Notification system ================= */
+    var stackEl = document.getElementById('notifications');
+    var statusEl = document.getElementById('sr-status');
+    var pauseBtn = document.getElementById('pause-btn');
+    var mainEl = document.getElementById('main');
+
+    var queue = [];            // queue[0] = front popup, later items sit behind it
+    var counter = 0;
+    var paused = false;
+    var lastOutsideFocus = null;
+
+    /* Remember where the user was, so focus can be restored (WCAG 2.4.3) */
+    document.addEventListener('focusin', function (e) {
+      if (!stackEl.contains(e.target)) { lastOutsideFocus = e.target; }
+    });
+
+    /* Single announcement function: all async events go through here */
+    var announceTimer = null;
+    function announce(message) {
+      clearTimeout(announceTimer);
+      statusEl.textContent = '';
+      announceTimer = setTimeout(function () { statusEl.textContent = message; }, 100);
+    }
+
+    function formatTime(d) {
+      return d.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    }
+
+    function createToast() {
+      var bookIndex = counter % BOOKS.length;
+      var book = BOOKS[bookIndex];
+      counter++;
+
+      var id = 'toast-' + counter;
+      var el = document.createElement('section');
+      el.className = 'toast entering';
+      el.setAttribute('role', 'group');
+      el.setAttribute('aria-labelledby', id + '-title');
+      el.setAttribute('aria-describedby', id + '-body');
+
+      var meta = document.createElement('p');
+      meta.className = 'toast-meta';
+      meta.id = id + '-meta';
+
+      var title = document.createElement('h2');
+      title.className = 'toast-title';
+      title.id = id + '-title';
+      title.textContent = 'New book recommended';
+
+      var body = document.createElement('p');
+      body.className = 'toast-body';
+      body.id = id + '-body';
+      body.textContent = '\u201C' + book[0] + '\u201D by ' + book[1] +
+        ' was added at ' + formatTime(new Date()) + '.';
+
+      var actions = document.createElement('div');
+      actions.className = 'toast-actions';
+
+      var viewBtn = document.createElement('button');
+      viewBtn.type = 'button';
+      viewBtn.className = 'primary';
+      viewBtn.textContent = 'View in table';
+      viewBtn.setAttribute('data-action', 'view');
+      viewBtn.setAttribute('aria-label', 'View ' + book[0] + ' in table');
+
+      var dismissBtn = document.createElement('button');
+      dismissBtn.type = 'button';
+      dismissBtn.textContent = 'Dismiss';
+      dismissBtn.setAttribute('data-action', 'dismiss');
+      dismissBtn.setAttribute('aria-label', 'Dismiss notification: ' + book[0]);
+
+      var dismissAllBtn = document.createElement('button');
+      dismissAllBtn.type = 'button';
+      dismissAllBtn.textContent = 'Dismiss all';
+      dismissAllBtn.setAttribute('data-action', 'dismiss-all');
+      dismissAllBtn.hidden = true;
+
+      actions.appendChild(viewBtn);
+      actions.appendChild(dismissBtn);
+      actions.appendChild(dismissAllBtn);
+
+      el.appendChild(meta);
+      el.appendChild(title);
+      el.appendChild(body);
+      el.appendChild(actions);
+
+      return { el: el, bookIndex: bookIndex, book: book, metaEl: meta, dismissAllBtn: dismissAllBtn, title: title.textContent, text: body.textContent };
+    }
+
+    /* Re-compute stacking, accessibility state and counters */
+    function render() {
+      var total = queue.length;
+      stackEl.hidden = total === 0;
+      layoutNotifications();
+
+      queue.forEach(function (item, i) {
+        var el = item.el;
+        el.style.setProperty('--depth', Math.min(i, MAX_VISIBLE_LAYERS));
+        el.classList.toggle('too-deep', i > MAX_VISIBLE_LAYERS);
+        el.classList.toggle('is-behind', i > 0);
+
+        // Only the front popup is perceivable/operable.
+        // Popups behind it are decorative slivers: hidden from AT and removed from tab order.
+        if (i === 0) {
+          el.removeAttribute('aria-hidden');
+          el.inert = false;
+        } else {
+          el.setAttribute('aria-hidden', 'true');
+          el.inert = true;
+        }
+
+        item.metaEl.textContent = 'Notification ' + (i + 1) + ' of ' + total +
+          (total > 1 ? ' (newer ones are behind this one)' : '');
+        item.dismissAllBtn.hidden = !(i === 0 && total > 1);
+        item.dismissAllBtn.textContent = 'Dismiss all (' + total + ')';
+      });
+    }
+
+    /* ---- Adaptive layout: avoid overlap with the table ---- */
+    var MIN_TABLE_RATIO = 0.7;   // table may shrink to 70% of its original width
+    var GAP_PX = 16;             // breathing room between table and popup
+    var pageEl = document.querySelector('.page');
+    var tableWrap = document.querySelector('.table-wrap');
+    var belowBtn = document.getElementById('below-btn');
+    var placement = 'none';      // 'none' | 'shrink' | 'below'
+    var layoutQueued = false;
+
+    function scheduleLayout() {
+      if (layoutQueued) { return; }
+      layoutQueued = true;
+      requestAnimationFrame(function () { layoutQueued = false; layoutNotifications(); });
+    }
+
+    function placeStack(inFlow) {
+      if (stackEl.classList.contains('in-flow') === inFlow) { return; }
+      var active = document.activeElement;
+      var hadFocus = stackEl.contains(active);
+      stackEl.classList.toggle('in-flow', inFlow);
+      if (inFlow) { pageEl.appendChild(stackEl); } else { document.body.appendChild(stackEl); }
+      if (hadFocus && active && active.focus) { active.focus(); }   // moving DOM drops focus
+    }
+
+    function layoutNotifications() {
+      var count = queue.length;
+      if (!count) {
+        placement = 'none';
+        tableWrap.style.maxWidth = '';
+        placeStack(false);
+        belowBtn.hidden = true;
+        return;
+      }
+
+      var rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      var cs = getComputedStyle(mainEl);
+      var padL = parseFloat(cs.paddingLeft) || 0;
+      var padR = parseFloat(cs.paddingRight) || 0;
+      var originalW = mainEl.clientWidth - padL - padR;          // table's un-shrunk width
+      var left = mainEl.getBoundingClientRect().left + padL;
+      var viewW = document.documentElement.clientWidth;
+      var popupW = Math.min(22.5 * rem, window.innerWidth - 2 * rem);
+      var popupLeft = viewW - rem - popupW;                     // popup's left edge (fixed, right:1rem)
+      var limit = popupLeft - GAP_PX;                           // table must end before this x
+      var tableRight = left + originalW;
+      var avail = limit - left;
+
+      // small hysteresis so a scrollbar appearing/disappearing cannot cause flip-flopping
+      var minRatio = MIN_TABLE_RATIO + (placement === 'below' ? 0.05 : 0);
+
+      if (tableRight <= limit) {                 // no interference: original layout
+        placement = 'none';
+        tableWrap.style.maxWidth = '';
+        placeStack(false);
+      } else if (avail >= originalW * minRatio) { // shrink the table just enough
+        placement = 'shrink';
+        tableWrap.style.maxWidth = Math.floor(avail) + 'px';
+        placeStack(false);
+      } else {                                    // would need >30% reduction: go below the table
+        placement = 'below';
+        tableWrap.style.maxWidth = '';
+        placeStack(true);
+      }
+
+      belowBtn.hidden = placement !== 'below';
+      if (placement === 'below') {
+        belowBtn.textContent = 'Go to notifications below the table (' + count + ')';
+      }
+    }
+
+    belowBtn.addEventListener('click', function () { focusNotifications(); });
+    window.addEventListener('resize', scheduleLayout);   // also fires on browser zoom / rotation
+
+    function addToast() {
+      var item = createToast();
+      queue.push(item);              // new popup goes BEHIND existing ones
+      stackEl.appendChild(item.el);
+      render();
+
+      // Trigger fade-in, honouring reduced motion via CSS
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { item.el.classList.remove('entering'); });
+      });
+
+      // Announce politely; never move focus (WCAG 3.2.1, 4.1.3)
+      var position = queue.length;
+      announce('New notification. ' + item.title + '. ' + item.text +
+        ' You now have ' + position + (position === 1 ? ' notification.' : ' notifications.') +
+        ' Press Alt plus N to review.');
+    }
+
+    function removeItem(item) {
+      var idx = queue.indexOf(item);
+      if (idx === -1) { return; }
+      queue.splice(idx, 1);
+      if (item.el.parentNode) { item.el.parentNode.removeChild(item.el); }
+    }
+
+    /* Move focus somewhere sensible when the focused popup disappears (WCAG 2.4.3) */
+    function restoreFocus(preferNextToast) {
+      if (preferNextToast && queue.length) {
+        var btn = queue[0].el.querySelector('button:not([hidden])');
+        if (btn) { btn.focus(); return; }
+      }
+      if (lastOutsideFocus && document.contains(lastOutsideFocus)) {
+        lastOutsideFocus.focus();
+      } else {
+        mainEl.focus();
+      }
+    }
+
+    function dismissFront() {
+      if (!queue.length) { return; }
+      var item = queue[0];
+      var hadFocus = item.el.contains(document.activeElement);
+      removeItem(item);
+      render();
+      if (hadFocus) { restoreFocus(true); }
+      announce('Notification dismissed. ' +
+        (queue.length ? queue.length + ' remaining.' : 'No notifications remaining.'));
+    }
+
+    function dismissAll() {
+      var hadFocus = stackEl.contains(document.activeElement);
+      var n = queue.length;
+      queue.slice().forEach(removeItem);
+      render();
+      if (hadFocus) { restoreFocus(false); }
+      announce('All ' + n + ' notifications dismissed.');
+    }
+
+    function viewInTable(item) {
+      var row = document.getElementById('book-' + item.bookIndex);
+      document.querySelectorAll('tr.highlight').forEach(function (r) { r.classList.remove('highlight'); });
+      removeItem(item);
+      render();
+      row.classList.add('highlight');
+      var rowHeader = row.querySelector('th');
+      rowHeader.focus();
+      rowHeader.scrollIntoView({ block: 'center' });
+      announce('Moved to ' + item.book[0] + ' in the table. ' +
+        (queue.length ? queue.length + ' notifications remaining.' : ''));
+    }
+
+    /* Click handling (event delegation) */
+    stackEl.addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-action]');
+      if (!btn || !queue.length) { return; }
+      var action = btn.getAttribute('data-action');
+      if (action === 'dismiss') { dismissFront(); }
+      else if (action === 'dismiss-all') { dismissAll(); }
+      else if (action === 'view') { viewInTable(queue[0]); }
+    });
+
+    /* Esc dismisses the front popup when focus is inside the notification area (WCAG 2.1.1) */
+    stackEl.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { e.preventDefault(); dismissFront(); }
+    });
+
+    /* Keyboard shortcut + skip link to reach the notifications */
+    function focusNotifications() {
+      if (!queue.length) { announce('No notifications.'); return; }
+      var btn = queue[0].el.querySelector('button:not([hidden])');
+      if (btn) { btn.focus(); }
+    }
+    document.addEventListener('keydown', function (e) {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'n' || e.key === 'N')) {
+        e.preventDefault();
+        focusNotifications();
+      }
+    });
+    document.getElementById('skip-notifications').addEventListener('click', function (e) {
+      e.preventDefault();
+      focusNotifications();
+    });
+
+    /* Pause / resume auto-appearing popups (WCAG 2.2.2 Pause, Stop, Hide) */
+    pauseBtn.addEventListener('click', function () {
+      paused = !paused;
+      pauseBtn.setAttribute('aria-pressed', String(paused));
+      announce(paused ? 'New notifications paused.' : 'New notifications resumed.');
+    });
+
+    /* Timer: a new popup every 15 seconds */
+    setInterval(function () {
+      if (!paused) { addToast(); }
+    }, INTERVAL_MS);
+  })();
+  </script>
+</body>
+</html>
